@@ -169,4 +169,8 @@ config SAMPLE_VFS
 	  as mount API and statx().  Note that this is restricted to the x86
 	  arch whilst it accesses system calls that aren't yet in all arches.
 
+config SAMPLE_FUSE2
+       bool "Build example server for fuse2"
+       select HEADERS_INSTALL
+
 endif # SAMPLES

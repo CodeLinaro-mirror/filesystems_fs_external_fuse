@@ -1,0 +1,7 @@
+config FUSE2_CORE
+	tristate
+	select FS_POSIX_ACL
+
+config FUSE2_FS
+	tristate "Experimental new fuse driver"
+	select FUSE2_CORE

@@ -244,6 +244,7 @@ struct fuse_file_lock {
 #define FOPEN_NONSEEKABLE	(1 << 2)
 #define FOPEN_CACHE_DIR		(1 << 3)
 #define FOPEN_STREAM		(1 << 4)
+#define FOPEN_MAP		(1 << 5)
 
 /**
  * INIT request/reply flags
@@ -422,6 +423,7 @@ enum fuse_opcode {
 	FUSE_RENAME2		= 45,
 	FUSE_LSEEK		= 46,
 	FUSE_COPY_FILE_RANGE	= 47,
+	FUSE_MAP		= 50,
 
 	/* CUSE specific operations */
 	CUSE_INIT		= 4096,
@@ -569,6 +571,12 @@ struct fuse_read_in {
 	uint64_t	lock_owner;
 	uint32_t	flags;
 	uint32_t	padding;
+};
+
+struct fuse_map_out {
+	uint64_t	mapfd;
+	uint64_t	offset;
+	uint64_t	size;
 };
 
 #define FUSE_COMPAT_WRITE_IN_SIZE 24
@@ -823,6 +831,14 @@ struct fuse_notify_retrieve_in {
 
 /* Device ioctls: */
 #define FUSE_DEV_IOC_CLONE	_IOR(229, 0, uint32_t)
+#define FUSE2_DEV_IOC_BIND	_IOW(229, 1, uint32_t)
+#define FUSE2_DEV_IOC_PROC	_IO(229, 2)
+#define FUSE2_DEV_IOC_READ	_IO(229, 3)
+#define FUSE2_DEV_IOC_MAP_OPEN	_IO(229, 4)
+#define FUSE2_DEV_IOC_MAP_CLOSE	_IO(230, 5)
+
+#define FUSE2_MMAP_INBUF_OFFSET		0x00000000UL
+#define FUSE2_MMAP_OUTBUF_OFFSET	0x80000000UL
 
 struct fuse_lseek_in {
 	uint64_t	fh;
