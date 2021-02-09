@@ -35,6 +35,7 @@
 #define pr_fmt(fmt) "CUSE: " fmt
 
 #include <linux/fuse.h>
+#include <linux/mm.h>
 #include <linux/cdev.h>
 #include <linux/device.h>
 #include <linux/file.h>
@@ -51,7 +52,7 @@
 #include <linux/uio.h>
 #include <linux/user_namespace.h>
 
-#include "fuse_i.h"
+#include <net/fuse.h>
 
 #define CUSE_CONNTBL_LEN	64
 
