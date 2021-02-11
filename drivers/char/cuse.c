@@ -58,8 +58,7 @@
 
 struct cuse_conn {
 	struct list_head	list;	/* linked on cuse_conntbl */
-	struct fuse_mount	fm;	/* Dummy mount referencing fc */
-	struct fuse_conn	fc;	/* fuse connection */
+	struct fuse_mount	*fm;	/* Dummy mount referencing fc */
 	struct cdev		*cdev;	/* associated character device */
 	struct device		*dev;	/* device representing @cdev */
 
@@ -73,7 +72,16 @@ static struct class *cuse_class;
 
 static struct cuse_conn *fc_to_cc(struct fuse_conn *fc)
 {
-	return container_of(fc, struct cuse_conn, fc);
+	return fuse_conn_private(fc);
+}
+
+static struct cuse_conn *file_to_cc(struct file *file)
+{
+	struct fuse_file *ff = file->private_data;
+	struct fuse_mount *fm = fuse_file_mount(ff);
+	struct fuse_conn *fc = fuse_mount_conn(fm);
+
+	return fc_to_cc(fc);
 }
 
 static struct list_head *cuse_conntbl_head(dev_t devt)
@@ -116,14 +124,16 @@ static int cuse_open(struct inode *inode, struct file *file)
 {
 	dev_t devt = inode->i_cdev->dev;
 	struct cuse_conn *cc = NULL, *pos;
+	struct fuse_conn *fc;
 	int rc;
 
 	/* look up and get the connection */
 	mutex_lock(&cuse_lock);
 	list_for_each_entry(pos, cuse_conntbl_head(devt), list)
 		if (pos->dev->devt == devt) {
-			fuse_conn_get(&pos->fc);
 			cc = pos;
+			fc = fuse_mount_conn(cc->fm);
+			fuse_conn_get(fc);
 			break;
 		}
 	mutex_unlock(&cuse_lock);
@@ -136,19 +146,19 @@ static int cuse_open(struct inode *inode, struct file *file)
 	 * Generic permission check is already done against the chrdev
 	 * file, proceed to open.
 	 */
-	rc = fuse_do_open(&cc->fm, 0, file, 0);
+	rc = fuse_do_open(cc->fm, 0, file, 0);
 	if (rc)
-		fuse_conn_put(&cc->fc);
+		fuse_conn_put(fc);
 	return rc;
 }
 
 static int cuse_release(struct inode *inode, struct file *file)
 {
 	struct fuse_file *ff = file->private_data;
-	struct fuse_mount *fm = ff->fm;
+	struct fuse_mount *fm = fuse_file_mount(ff);
 
 	fuse_sync_release(NULL, ff, file->f_flags);
-	fuse_conn_put(fm->fc);
+	fuse_conn_put(fuse_mount_conn(fm));
 
 	return 0;
 }
@@ -156,8 +166,7 @@ static int cuse_release(struct inode *inode, struct file *file)
 static long cuse_file_ioctl(struct file *file, unsigned int cmd,
 			    unsigned long arg)
 {
-	struct fuse_file *ff = file->private_data;
-	struct cuse_conn *cc = fc_to_cc(ff->fm->fc);
+	struct cuse_conn *cc = file_to_cc(file);
 	unsigned int flags = 0;
 
 	if (cc->unrestricted_ioctl)
@@ -169,8 +178,7 @@ static long cuse_file_ioctl(struct file *file, unsigned int cmd,
 static long cuse_file_compat_ioctl(struct file *file, unsigned int cmd,
 				   unsigned long arg)
 {
-	struct fuse_file *ff = file->private_data;
-	struct cuse_conn *cc = fc_to_cc(ff->fm->fc);
+	struct cuse_conn *cc = file_to_cc(file);
 	unsigned int flags = FUSE_IOCTL_COMPAT;
 
 	if (cc->unrestricted_ioctl)
@@ -318,7 +326,7 @@ struct cuse_init_args {
 static void cuse_process_init_reply(struct fuse_mount *fm,
 				    struct fuse_args *args, int error)
 {
-	struct fuse_conn *fc = fm->fc;
+	struct fuse_conn *fc = fuse_mount_conn(fm);
 	struct cuse_init_args *ia = container_of(args, typeof(*ia), ap.args);
 	struct fuse_args_pages *ap = &ia->ap;
 	struct cuse_conn *cc = fc_to_cc(fc), *pos;
@@ -329,13 +337,14 @@ static void cuse_process_init_reply(struct fuse_mount *fm,
 	struct cdev *cdev;
 	dev_t devt;
 	int rc, i;
+	unsigned int max_read, max_write;
 
 	if (error || arg->major != FUSE_KERNEL_VERSION || arg->minor < 11)
 		goto err;
 
-	fc->minor = arg->minor;
-	fc->max_read = max_t(unsigned, arg->max_read, 4096);
-	fc->max_write = max_t(unsigned, arg->max_write, 4096);
+	max_read = max_t(unsigned, arg->max_read, 4096);
+	max_write = max_t(unsigned, arg->max_write, 4096);
+	fuse_conn_update_param(fc, max_read, max_write, arg->minor);
 
 	/* parse init reply */
 	cc->unrestricted_ioctl = arg->flags & CUSE_UNRESTRICTED_IOCTL;
@@ -427,7 +436,7 @@ static int cuse_send_init(struct cuse_conn *cc)
 {
 	int rc;
 	struct page *page;
-	struct fuse_mount *fm = &cc->fm;
+	struct fuse_mount *fm = cc->fm;
 	struct cuse_init_args *ia;
 	struct fuse_args_pages *ap;
 
@@ -476,6 +485,7 @@ err:
 static void cuse_fc_release(struct fuse_conn *fc)
 {
 	struct cuse_conn *cc = fc_to_cc(fc);
+	struct fuse_mount *fm = cc->fm;
 
 	/* remove from the conntbl, no more access from this point on */
 	mutex_lock(&cuse_lock);
@@ -490,7 +500,11 @@ static void cuse_fc_release(struct fuse_conn *fc)
 		cdev_del(cc->cdev);
 	}
 
-	kfree_rcu(cc, fc.rcu);
+	/* Must be the only "mount" */
+	WARN_ON(!fuse_mount_remove(fm));
+	kfree(fm);
+
+	kfree(cc);
 }
 
 /**
@@ -511,6 +525,8 @@ static void cuse_fc_release(struct fuse_conn *fc)
 static int cuse_channel_open(struct inode *inode, struct file *file)
 {
 	struct fuse_dev *fud;
+	struct fuse_mount *fm;
+	struct fuse_conn *fc;
 	struct cuse_conn *cc;
 	int rc;
 
@@ -523,18 +539,22 @@ static int cuse_channel_open(struct inode *inode, struct file *file)
 	 * Limit the cuse channel to requests that can
 	 * be represented in file->f_cred->user_ns.
 	 */
-	fuse_conn_init(&cc->fc, &cc->fm, file->f_cred->user_ns,
-		       &fuse_dev_fiq_ops, NULL);
-
-	cc->fc.release = cuse_fc_release;
-	fud = fuse_dev_alloc_install(&cc->fc);
-	fuse_conn_put(&cc->fc);
+	fm = fuse_conn_new(file->f_cred->user_ns, &fuse_dev_fiq_ops, NULL,
+			   cc, cuse_fc_release);
+	if (!fm) {
+		kfree(cc);
+		return -ENOMEM;
+	}
+	cc->fm = fm;
+	fc = fuse_mount_conn(fm);
+	fud = fuse_dev_alloc_install(fc);
+	fuse_conn_put(fc);
 	if (!fud)
 		return -ENOMEM;
 
 	INIT_LIST_HEAD(&cc->list);
 
-	cc->fc.initialized = 1;
+	fuse_set_initialized(fc);
 	rc = cuse_send_init(cc);
 	if (rc) {
 		fuse_dev_free(fud);
@@ -558,8 +578,9 @@ static ssize_t cuse_class_waiting_show(struct device *dev,
 				       struct device_attribute *attr, char *buf)
 {
 	struct cuse_conn *cc = dev_get_drvdata(dev);
+	struct fuse_conn *fc = fuse_mount_conn(cc->fm);
 
-	return sprintf(buf, "%d\n", atomic_read(&cc->fc.num_waiting));
+	return sprintf(buf, "%d\n", fuse_conn_waiting(fc));
 }
 static DEVICE_ATTR(waiting, 0400, cuse_class_waiting_show, NULL);
 
@@ -569,7 +590,7 @@ static ssize_t cuse_class_abort_store(struct device *dev,
 {
 	struct cuse_conn *cc = dev_get_drvdata(dev);
 
-	fuse_abort_conn(&cc->fc);
+	fuse_abort_conn(fuse_mount_conn(cc->fm));
 	return count;
 }
 static DEVICE_ATTR(abort, 0200, NULL, cuse_class_abort_store);

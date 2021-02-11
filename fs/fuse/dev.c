@@ -81,6 +81,7 @@ void fuse_set_initialized(struct fuse_conn *fc)
 	smp_wmb();
 	fc->initialized = 1;
 }
+EXPORT_SYMBOL_GPL(fuse_set_initialized);
 
 static bool fuse_block_alloc(struct fuse_conn *fc, bool for_background)
 {

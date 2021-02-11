@@ -684,11 +684,24 @@ static void fuse_pqueue_init(struct fuse_pqueue *fpq)
 	fpq->connected = 1;
 }
 
-void fuse_conn_init(struct fuse_conn *fc, struct fuse_mount *fm,
-		    struct user_namespace *user_ns,
-		    const struct fuse_iqueue_ops *fiq_ops, void *fiq_priv)
+struct fuse_mount *fuse_conn_new(struct user_namespace *user_ns,
+				 const struct fuse_iqueue_ops *fiq_ops,
+				 void *fiq_priv, void *private,
+				 void (*release)(struct fuse_conn *))
 {
-	memset(fc, 0, sizeof(*fc));
+	struct fuse_conn *fc;
+	struct fuse_mount *fm;
+
+	fc = kzalloc(sizeof(struct fuse_conn), GFP_KERNEL);
+	if (!fc)
+		return NULL;
+
+	fm = kzalloc(sizeof(struct fuse_mount), GFP_KERNEL);
+	if (!fm) {
+		kfree(fc);
+		return NULL;
+	}
+
 	spin_lock_init(&fc->lock);
 	spin_lock_init(&fc->bg_lock);
 	init_rwsem(&fc->killsb);
@@ -712,12 +725,16 @@ void fuse_conn_init(struct fuse_conn *fc, struct fuse_mount *fm,
 	fc->pid_ns = get_pid_ns(task_active_pid_ns(current));
 	fc->user_ns = get_user_ns(user_ns);
 	fc->max_pages = FUSE_DEFAULT_MAX_PAGES_PER_REQ;
+	fc->private = private;
+	fc->release = release;
 
 	INIT_LIST_HEAD(&fc->mounts);
 	list_add(&fm->fc_entry, &fc->mounts);
 	fm->fc = fc;
+
+	return fm;
 }
-EXPORT_SYMBOL_GPL(fuse_conn_init);
+EXPORT_SYMBOL_GPL(fuse_conn_new);
 
 void fuse_conn_put(struct fuse_conn *fc)
 {
@@ -730,10 +747,34 @@ void fuse_conn_put(struct fuse_conn *fc)
 			fiq->ops->release(fiq);
 		put_pid_ns(fc->pid_ns);
 		put_user_ns(fc->user_ns);
-		fc->release(fc);
+		if (fc->release)
+			fc->release(fc);
+		WARN_ON(!list_empty(&fc->devices));
+		kfree_rcu(fc, rcu);
 	}
 }
 EXPORT_SYMBOL_GPL(fuse_conn_put);
+
+void *fuse_conn_private(struct fuse_conn *fc)
+{
+	return fc->private;
+}
+EXPORT_SYMBOL_GPL(fuse_conn_private);
+
+void fuse_conn_update_param(struct fuse_conn *fc, unsigned int max_read,
+			    unsigned int max_write, unsigned int minor)
+{
+	fc->max_read = max_read;
+	fc->max_write = max_write;
+	fc->minor = minor;
+}
+EXPORT_SYMBOL_GPL(fuse_conn_update_param);
+
+int fuse_conn_waiting(struct fuse_conn *fc)
+{
+	return atomic_read(&fc->num_waiting);
+}
+EXPORT_SYMBOL_GPL(fuse_conn_waiting);
 
 struct fuse_conn *fuse_conn_get(struct fuse_conn *fc)
 {
@@ -741,6 +782,18 @@ struct fuse_conn *fuse_conn_get(struct fuse_conn *fc)
 	return fc;
 }
 EXPORT_SYMBOL_GPL(fuse_conn_get);
+
+struct fuse_conn *fuse_mount_conn(struct fuse_mount *fm)
+{
+	return fm->fc;
+}
+EXPORT_SYMBOL_GPL(fuse_mount_conn);
+
+struct fuse_mount *fuse_file_mount(struct fuse_file *ff)
+{
+	return ff->fm;
+}
+EXPORT_SYMBOL_GPL(fuse_file_mount);
 
 static struct inode *fuse_get_root_inode(struct super_block *sb, unsigned mode)
 {
@@ -1123,13 +1176,6 @@ void fuse_send_init(struct fuse_mount *fm)
 }
 EXPORT_SYMBOL_GPL(fuse_send_init);
 
-void fuse_free_conn(struct fuse_conn *fc)
-{
-	WARN_ON(!list_empty(&fc->devices));
-	kfree_rcu(fc, rcu);
-}
-EXPORT_SYMBOL_GPL(fuse_free_conn);
-
 static int fuse_bdi_init(struct fuse_conn *fc, struct super_block *sb)
 {
 	int err;
@@ -1417,7 +1463,6 @@ static int fuse_fill_super(struct super_block *sb, struct fs_context *fsc)
 	struct fuse_fs_context *ctx = fsc->fs_private;
 	struct file *file;
 	int err;
-	struct fuse_conn *fc;
 	struct fuse_mount *fm;
 
 	err = -EINVAL;
@@ -1434,19 +1479,10 @@ static int fuse_fill_super(struct super_block *sb, struct fs_context *fsc)
 		goto err_fput;
 	ctx->fudptr = &file->private_data;
 
-	fc = kmalloc(sizeof(*fc), GFP_KERNEL);
 	err = -ENOMEM;
-	if (!fc)
+	fm = fuse_conn_new(sb->s_user_ns, &fuse_dev_fiq_ops, NULL, NULL, NULL);
+	if (!fm)
 		goto err_fput;
-
-	fm = kzalloc(sizeof(*fm), GFP_KERNEL);
-	if (!fm) {
-		kfree(fc);
-		goto err_fput;
-	}
-
-	fuse_conn_init(fc, fm, sb->s_user_ns, &fuse_dev_fiq_ops, NULL);
-	fc->release = fuse_free_conn;
 
 	sb->s_fs_info = fm;
 
@@ -1463,7 +1499,7 @@ static int fuse_fill_super(struct super_block *sb, struct fs_context *fsc)
 	return 0;
 
  err_put_conn:
-	fuse_conn_put(fc);
+	fuse_conn_put(fm->fc);
 	kfree(fm);
 	sb->s_fs_info = NULL;
  err_fput:
