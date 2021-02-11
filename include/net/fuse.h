@@ -575,6 +575,5 @@ ssize_t fuse_direct_io(struct fuse_io_priv *io, struct iov_iter *iter,
 long fuse_do_ioctl(struct file *file, unsigned int cmd, unsigned long arg,
 		   unsigned int flags);
 __poll_t fuse_file_poll(struct file *file, poll_table *wait);
-int fuse_dev_release(struct inode *inode, struct file *file);
 
 #endif /* _NET_FUSE_H */

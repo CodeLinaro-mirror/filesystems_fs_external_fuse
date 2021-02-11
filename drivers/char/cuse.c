@@ -476,6 +476,20 @@ err:
 static void cuse_fc_release(struct fuse_conn *fc)
 {
 	struct cuse_conn *cc = fc_to_cc(fc);
+
+	/* remove from the conntbl, no more access from this point on */
+	mutex_lock(&cuse_lock);
+	list_del_init(&cc->list);
+	mutex_unlock(&cuse_lock);
+
+	/* remove device */
+	if (cc->dev)
+		device_unregister(cc->dev);
+	if (cc->cdev) {
+		unregister_chrdev_region(cc->cdev->dev, 1);
+		cdev_del(cc->cdev);
+	}
+
 	kfree_rcu(cc, fc.rcu);
 }
 
@@ -529,41 +543,6 @@ static int cuse_channel_open(struct inode *inode, struct file *file)
 	file->private_data = fud;
 
 	return 0;
-}
-
-/**
- * cuse_channel_release - release method for /dev/cuse
- * @inode: inode for /dev/cuse
- * @file: file struct being closed
- *
- * Disconnect the channel, deregister CUSE device and initiate
- * destruction by putting the default reference.
- *
- * RETURNS:
- * 0 on success, -errno on failure.
- */
-static int cuse_channel_release(struct inode *inode, struct file *file)
-{
-	struct fuse_dev *fud = file->private_data;
-	struct cuse_conn *cc = fc_to_cc(fud->fc);
-	int rc;
-
-	/* remove from the conntbl, no more access from this point on */
-	mutex_lock(&cuse_lock);
-	list_del_init(&cc->list);
-	mutex_unlock(&cuse_lock);
-
-	/* remove device */
-	if (cc->dev)
-		device_unregister(cc->dev);
-	if (cc->cdev) {
-		unregister_chrdev_region(cc->cdev->dev, 1);
-		cdev_del(cc->cdev);
-	}
-
-	rc = fuse_dev_release(inode, file);	/* puts the base reference */
-
-	return rc;
 }
 
 static struct file_operations cuse_channel_fops; /* initialized during init */
@@ -623,7 +602,6 @@ static int __init cuse_init(void)
 	cuse_channel_fops		= fuse_dev_operations;
 	cuse_channel_fops.owner		= THIS_MODULE;
 	cuse_channel_fops.open		= cuse_channel_open;
-	cuse_channel_fops.release	= cuse_channel_release;
 
 	cuse_class = class_create(THIS_MODULE, "cuse");
 	if (IS_ERR(cuse_class))

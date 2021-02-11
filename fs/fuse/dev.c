@@ -2173,7 +2173,7 @@ void fuse_wait_aborted(struct fuse_conn *fc)
 	wait_event(fc->blocked_waitq, atomic_read(&fc->num_waiting) == 0);
 }
 
-int fuse_dev_release(struct inode *inode, struct file *file)
+static int fuse_dev_release(struct inode *inode, struct file *file)
 {
 	struct fuse_dev *fud = fuse_get_dev(file);
 
@@ -2200,7 +2200,6 @@ int fuse_dev_release(struct inode *inode, struct file *file)
 	}
 	return 0;
 }
-EXPORT_SYMBOL_GPL(fuse_dev_release);
 
 static int fuse_dev_fasync(int fd, struct file *file, int on)
 {
