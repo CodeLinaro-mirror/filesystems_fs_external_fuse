@@ -3606,8 +3606,7 @@ static int vfs_tmpfile(struct user_namespace *mnt_userns,
 	file->f_path.mnt = parentpath->mnt;
 	file->f_path.dentry = child;
 	mode = vfs_prepare_mode(mnt_userns, dir, mode, mode, mode);
-	error = dir->i_op->tmpfile(mnt_userns, dir, child, mode);
-	error = finish_open_simple(file, error);
+	error = dir->i_op->tmpfile(mnt_userns, dir, file, mode);
 	dput(child);
 	if (error)
 		goto out_err;

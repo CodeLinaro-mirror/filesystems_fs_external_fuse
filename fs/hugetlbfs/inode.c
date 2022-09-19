@@ -889,7 +889,7 @@ static int do_hugetlbfs_mknod(struct inode *dir,
 			struct dentry *dentry,
 			umode_t mode,
 			dev_t dev,
-			bool tmpfile)
+			struct file *tmpfile)
 {
 	struct inode *inode;
 	int error = -ENOSPC;
@@ -898,7 +898,7 @@ static int do_hugetlbfs_mknod(struct inode *dir,
 	if (inode) {
 		dir->i_ctime = dir->i_mtime = current_time(dir);
 		if (tmpfile) {
-			d_tmpfile(dentry, inode);
+			d_tmpfile(tmpfile, inode);
 		} else {
 			d_instantiate(dentry, inode);
 			dget(dentry);/* Extra count - pin the dentry in core */
@@ -911,7 +911,7 @@ static int do_hugetlbfs_mknod(struct inode *dir,
 static int hugetlbfs_mknod(struct user_namespace *mnt_userns, struct inode *dir,
 			   struct dentry *dentry, umode_t mode, dev_t dev)
 {
-	return do_hugetlbfs_mknod(dir, dentry, mode, dev, false);
+	return do_hugetlbfs_mknod(dir, dentry, mode, dev, NULL);
 }
 
 static int hugetlbfs_mkdir(struct user_namespace *mnt_userns, struct inode *dir,
@@ -932,10 +932,12 @@ static int hugetlbfs_create(struct user_namespace *mnt_userns,
 }
 
 static int hugetlbfs_tmpfile(struct user_namespace *mnt_userns,
-			     struct inode *dir, struct dentry *dentry,
+			     struct inode *dir, struct file *file,
 			     umode_t mode)
 {
-	return do_hugetlbfs_mknod(dir, dentry, mode | S_IFREG, 0, true);
+	int err = do_hugetlbfs_mknod(dir, file->f_path.dentry, mode | S_IFREG, 0, file);
+
+	return finish_open_simple(file, err);
 }
 
 static int hugetlbfs_symlink(struct user_namespace *mnt_userns,
