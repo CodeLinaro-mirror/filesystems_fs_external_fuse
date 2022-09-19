@@ -194,16 +194,16 @@ static int ovl_copy_fileattr(struct inode *inode, struct path *old,
 }
 
 static int ovl_copy_up_data(struct ovl_fs *ofs, struct path *old,
-			    struct path *new, loff_t len)
+			    struct path *new, struct file *new_file, loff_t len)
 {
 	struct file *old_file;
-	struct file *new_file;
 	loff_t old_pos = 0;
 	loff_t new_pos = 0;
 	loff_t cloned;
 	loff_t data_pos = -1;
 	loff_t hole_len;
 	bool skip_hole = false;
+	bool fput_new = false;
 	int error = 0;
 
 	if (len == 0)
@@ -213,10 +213,13 @@ static int ovl_copy_up_data(struct ovl_fs *ofs, struct path *old,
 	if (IS_ERR(old_file))
 		return PTR_ERR(old_file);
 
-	new_file = ovl_path_open(new, O_LARGEFILE | O_WRONLY);
-	if (IS_ERR(new_file)) {
-		error = PTR_ERR(new_file);
-		goto out_fput;
+	if (!new_file) {
+		new_file = ovl_path_open(new, O_LARGEFILE | O_WRONLY);
+		if (IS_ERR(new_file)) {
+			error = PTR_ERR(new_file);
+			goto out_fput;
+		}
+		fput_new = true;
 	}
 
 	/* Try to use clone_file_range to clone up within the same fs */
@@ -285,7 +288,8 @@ static int ovl_copy_up_data(struct ovl_fs *ofs, struct path *old,
 out:
 	if (!error && ovl_should_sync(ofs))
 		error = vfs_fsync(new_file, 0);
-	fput(new_file);
+	if (fput_new)
+		fput(new_file);
 out_fput:
 	fput(old_file);
 	return error;
@@ -556,7 +560,8 @@ static int ovl_link_up(struct ovl_copy_up_ctx *c)
 	return err;
 }
 
-static int ovl_copy_up_inode(struct ovl_copy_up_ctx *c, struct dentry *temp)
+static int ovl_copy_up_inode(struct ovl_copy_up_ctx *c, struct dentry *temp,
+			     struct file *tmpfile)
 {
 	struct ovl_fs *ofs = OVL_FS(c->dentry->d_sb);
 	struct inode *inode = d_inode(c->dentry);
@@ -575,7 +580,7 @@ static int ovl_copy_up_inode(struct ovl_copy_up_ctx *c, struct dentry *temp)
 	 */
 	if (S_ISREG(c->stat.mode) && !c->metacopy) {
 		ovl_path_lowerdata(c->dentry, &datapath);
-		err = ovl_copy_up_data(ofs, &datapath, &upperpath,
+		err = ovl_copy_up_data(ofs, &datapath, &upperpath, tmpfile,
 				       c->stat.size);
 		if (err)
 			return err;
@@ -688,7 +693,7 @@ static int ovl_copy_up_workdir(struct ovl_copy_up_ctx *c)
 	if (IS_ERR(temp))
 		goto unlock;
 
-	err = ovl_copy_up_inode(c, temp);
+	err = ovl_copy_up_inode(c, temp, NULL);
 	if (err)
 		goto cleanup;
 
@@ -732,6 +737,7 @@ static int ovl_copy_up_tmpfile(struct ovl_copy_up_ctx *c)
 	struct ovl_fs *ofs = OVL_FS(c->dentry->d_sb);
 	struct inode *udir = d_inode(c->destdir);
 	struct dentry *temp, *upper;
+	struct file *tmpfile;
 	struct ovl_cu_creds cc;
 	int err;
 
@@ -739,15 +745,16 @@ static int ovl_copy_up_tmpfile(struct ovl_copy_up_ctx *c)
 	if (err)
 		return err;
 
-	temp = ovl_do_tmpfile(ofs, c->workdir, c->stat.mode);
+	tmpfile = ovl_do_tmpfile(ofs, c->workdir, c->stat.mode);
 	ovl_revert_cu_creds(&cc);
 
-	if (IS_ERR(temp))
-		return PTR_ERR(temp);
+	if (IS_ERR(tmpfile))
+		return PTR_ERR(tmpfile);
 
-	err = ovl_copy_up_inode(c, temp);
+	temp = tmpfile->f_path.dentry;
+	err = ovl_copy_up_inode(c, temp, tmpfile);
 	if (err)
-		goto out_dput;
+		goto out_fput;
 
 	inode_lock_nested(udir, I_MUTEX_PARENT);
 
@@ -761,16 +768,14 @@ static int ovl_copy_up_tmpfile(struct ovl_copy_up_ctx *c)
 	inode_unlock(udir);
 
 	if (err)
-		goto out_dput;
+		goto out_fput;
 
 	if (!c->metacopy)
 		ovl_set_upperdata(d_inode(c->dentry));
-	ovl_inode_update(d_inode(c->dentry), temp);
+	ovl_inode_update(d_inode(c->dentry), dget(temp));
 
-	return 0;
-
-out_dput:
-	dput(temp);
+out_fput:
+	fput(tmpfile);
 	return err;
 }
 
@@ -919,7 +924,7 @@ static int ovl_copy_up_meta_inode_data(struct ovl_copy_up_ctx *c)
 			goto out;
 	}
 
-	err = ovl_copy_up_data(ofs, &datapath, &upperpath, c->stat.size);
+	err = ovl_copy_up_data(ofs, &datapath, &upperpath, NULL, c->stat.size);
 	if (err)
 		goto out_free;
 
