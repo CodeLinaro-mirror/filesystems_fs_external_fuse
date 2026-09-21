@@ -551,6 +551,10 @@ static int fuse_fsync(struct file *file, loff_t start, loff_t end,
 	if (fuse_is_bad(inode))
 		return -EIO;
 
+	/* Skip sync for DAX inodes */
+	if (IS_DAX(inode) && !fuse_inode_vdax(inode))
+		return 0;
+
 	inode_lock(inode);
 
 	/*
